@@ -1,0 +1,12 @@
+{
+	"manifest_version": 1,
+	"id": "io.github.wwoods.JoplinPluginRemember",
+	"app_min_version": "1.7",
+	"version": "1.0.0",
+	"name": "Remember",
+	"description": "Spaced repetition plugin",
+	"author": "Walt Woods",
+	"homepage_url": "",
+	"repository_url": "https://github.com/wwoods/joplin-plugin-remember",
+	"keywords": []
+}
