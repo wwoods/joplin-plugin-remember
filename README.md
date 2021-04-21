@@ -1,3 +1,61 @@
+# joplin-plugin-remember
+
+## Usage
+
+Something like:
+
+```
+\`\`\`remember
+Some text to remember
+\`\`\`
+```
+
+Will associate the note's title with the specified content.
+
+```
+\`\`\`remember
+Some text to remember
+# Context
+Content to remember it by
+\`\`\`
+```
+
+Will instead provide `Content to remember it by` as the triggering key.
+
+```
+\`\`\`remember
+Blah
+# Options
+reverse: true
+\`\`\`
+```
+
+Will half of the time use the content to be remembered as the memory key,
+asking that the user recall the context.
+
+The notebook `Remember-DB-Review` will be used to present the user with daily
+(or however often) quizzes. These should be viewed in non-markdown mode -- the
+user can click through, adding additional context, and then check their work.
+They then check a box answering a 0-5 scale on how comfortable they were with
+the level of recall. Any unanswered questions are totally fine, as the system
+will simply add them to the next survey (as though the user hadn't seen them).
+
+Each note may have zero or more `remember` blocks. Each one is treated as a
+unique factoid, and receives its own weighting for spaced repetition. The first
+time that `joplin-plugin-remember` scans a `remember` block, it will append some
+metadata to the opening statement which acts as a unique ID, such that other
+blocks may be added / removed without messing up the tracking of factoids.
+
+## Improper Usage
+
+The system is fine with deleting remember blocks. If you're in the text editor taking notes and don't want the overhead of splitting notes / dealing with Joplin's UI:
+
+```
+\`\`\`remember
+Put above in its own note! Or add to my calendar
+\`\`\`
+```
+
 # Joplin Plugin
 
 This is a template to create a new Joplin plugin.
