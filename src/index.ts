@@ -12,7 +12,7 @@ function* findRememberBlocks(body: string) {
   const regex = /(^|\n)(```remember( |\n|$).*?(^|\n)```)/gms;
   let m;
   while ((m = regex.exec(body)) !== null) {
-    yield new RememberBlockMatch(m[2], m.index + 1, m[1].length);
+    yield new RememberBlockMatch(m[2], m.index + 1, m.index + m[0].length);
   }
 }
 
@@ -24,14 +24,17 @@ joplin.plugins.register({
 	onStart: async function() {
 		console.info('joplin-plugin-remember plugin started!');
 
-    let scanIsForced: boolean = false;
+    let scanUnderway: boolean = false;
     const forceScan = async () => {
-      scanIsForced = true;
+      while (scanUnderway) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      scanUnderway = true;
       try {
         await db.scan(true);
       }
       finally {
-        scanIsForced = false;
+        scanUnderway = false;
       }
     };
     (window as any).rememberPluginForceScan = forceScan;
@@ -59,12 +62,16 @@ joplin.plugins.register({
     await db.init();
 
     while (true) {
-      if (!scanIsForced) {
+      if (!scanUnderway) {
+        scanUnderway = true;
         try {
           await db.scan();
         }
         catch (e) {
           console.error(e);
+        }
+        finally {
+          scanUnderway = false;
         }
       }
 
@@ -202,10 +209,11 @@ class Db {
       const wasTracked = await this.specificNote(noteName);
       if (wasTracked) continue;
 
+      const logPg = new PropertyGrid();
       await joplin.data.post(['notes'], null, {
         title: n.title,
         source_url: this.specificNoteValue(noteName),
-        body: `[${n.title}](:/${n.id})\n\n`,
+        body: `[${n.title}](:/${n.id})\n${logPg.toString()}\n\n`,
         parent_id: this.logFolder,
       });
     }
@@ -262,7 +270,7 @@ class Db {
     const logRecord = new LogRecord(logNote);
     const baseNote = await joplin.data.get(['notes', logRecord.note_id],
         {fields: ['id', 'title', 'body', 'parent_id']});
-    logRecord.loadBlocks(baseNote);
+    await logRecord.loadBlocks(baseNote);
     await logRecord.write();
 
     const r = []
@@ -355,43 +363,164 @@ class Db {
 /** A class for dealing with log notes. */
 class LogRecord {
   blocksOfContent: Array<RememberBlock> = [];
+  blocksTracked: Array<LogBlockRecord> = [];
   logNote: any;
+  note_id: string;
+  note_title: string;
+  pg: PropertyGrid;
 
   constructor(logNote) {
-    this.logNote = logNote;
-  }
+    let m;
 
-  get note_id() {
-    const m = (/^\[.*?\]\(:\/([a-z0-9]+)\)/).exec(this.logNote.body);
+    this.logNote = logNote;
+
+    m = (/^\[(.*?)\]\(:\/([a-z0-9]+)\)/).exec(this.logNote.body);
     if (m === null) {
       throw new Error(`Could not find note_id from ${this.logNote.body}`);
     }
-    return m[1];
+    this.note_title = m[1];
+    this.note_id = m[2];
+
+    m = (/^(\|(.|\n\|)*\|)\s*($|[^|])/gm).exec(this.logNote.body);
+    if (m === null) {
+      throw new Error(`Could not find log's property grid? ${this.logNote.body}`);
+    }
+    this.pg = new PropertyGrid();
+    this.pg.load(m[1]);
+
+    const r3 = /^# (\s+)(.*?)(?=$#)/gm;
+    while ((m = r3.exec(this.logNote.body)) !== null) {
+      const table = new NoteTable();
+      table.load(m[2]);
+      this.blocksTracked.push(new LogBlockRecord(m[1], table));
+    }
   }
 
 
   /** Given a note (with title, body, source_url), load blocksOfContent into
-   * this log document. */
-  loadBlocks(note: any) {
+   * this log document.
+   *
+   * If any remember block gets a new ID, the note is modified to reflect the
+   * new ID. This is the only change which happens in a user's note.
+   * */
+  async loadBlocks(note: any) {
     console.log(`Finding content in ${note.id} / ${note.title}`);
+
+    // Update title, if needed.
+    this.note_title = note.title;
+
+    const trackedBlocks = {};
+    for (const b of this.blocksTracked) {
+      trackedBlocks[b.blockId] = b;
+    }
+
+    let bodyChanged = false;
+    let newBody = [];
+    let lastMatchIndex = 0;
 
     this.blocksOfContent = [];
     for (const match of findRememberBlocks(note.body)) {
-      this.blocksOfContent.push(new RememberBlock(this, match));
+      const b = new RememberBlock(this, match);
+      this.blocksOfContent.push(b);
+
+      if (b.id === null) {
+        bodyChanged = true;
+        b.id = this.makeNewBlockId();
+      }
+
+      // Update body either way, in case another block changes
+      if (lastMatchIndex !== match.start) {
+        newBody.push(note.body.substring(lastMatchIndex, match.start));
+      }
+      newBody.push(b.toString());
+      lastMatchIndex = match.stop;
+
+      // Make a new log entry, if needed
+      if (trackedBlocks[b.id] === undefined) {
+        const table = new NoteTable();
+        table.headers = ['date', 'reviewNum', 'userRating', 'efactor', 'daysToNext'];
+        const tb = new LogBlockRecord(b.id, table);
+        this.blocksTracked.push(tb);
+        trackedBlocks[b.id] = tb;
+      }
     }
+
+    if (this.pg.properties.blockIdMax === undefined) {
+      // This can happen when blocks are deleted or joplin-plugin-remember
+      // gets re-initialized through the deletion of its notebook. In this case,
+      // re-assign to highest known id.
+      let idMax = 0;
+      for (const b of this.blocksTracked) {
+        idMax = Math.max(idMax, parseInt(b.blockId));
+      }
+      this.pg.properties.blockIdMax = idMax;
+    }
+
+    if (bodyChanged) {
+      console.log(`Writing new block IDs for ${note.id} / ${note.title}`);
+      if (lastMatchIndex !== note.body.length) {
+        newBody.push(note.body.substring(lastMatchIndex));
+      }
+      await joplin.data.put(['notes', note.id], null, {
+        body: newBody.join(''),
+      });
+    }
+  }
+
+  /** Allocate and remember a new block id. */
+  makeNewBlockId() {
+    if (this.pg.properties.blockIdMax === undefined) {
+      this.pg.properties.blockIdMax = 0;
+    }
+    this.pg.properties.blockIdMax += 1;
+    return this.pg.properties.blockIdMax.toString();
   }
 
   updateScore(blockId: string, date: string, reviewNum: number, score: number) {
   }
 
   async write() {
+    const r = [];
+    r.push(`[${this.note_title}](:/${this.note_id})\n`);
+    r.push(this.pg.toString());
+    r.push('\n');
+    for (const block of this.blocksTracked) {
+      r.push(block.toString());
+    }
+    await joplin.data.put(['notes', this.logNote.id], null, {
+      body: r.join(''),
+    });
+  }
+}
+
+
+/** Within a LogRecord, this is the information for a single remember block. */
+class LogBlockRecord {
+  constructor(public blockId: string, public data: NoteTable) {
+  }
+
+
+  toString() {
+    const r = [];
+    r.push(`# ${this.blockId}\n`);
+    r.push(this.data.toString());
+    return r.join('');
   }
 }
 
 
 /** Content block within a note -- temporary class. */
 class RememberBlock {
+  id: string;
+
   constructor(public logRecord: LogRecord, public blockContent: RememberBlockMatch) {
+    const name = /^```remember (\S+)/.exec(blockContent.text);
+    if (name === null) {
+      this.id = null;
+    }
+    else {
+      this.id = name[1];
+    }
   }
 
 
@@ -409,7 +538,16 @@ class RememberBlock {
     for (let i = 5; i >= 0; --i) {
       r.push(`- [ ] ${i}\n`);
     }
+    r.push(`\n\nID: ${this.logRecord.note_id}:${this.id}`);
     return r.join('');
+  }
+
+
+  toString() {
+    const lines = this.blockContent.text.split('\n');
+    if (!lines[0].startsWith('```remember')) throw new Error(`Bad first line? ${lines[0]}`);
+    lines[0] = '```remember ' + this.id;
+    return lines.join('\n');
   }
 }
 
@@ -443,13 +581,15 @@ class ReviewRecord {
 }
 
 
-/** A class which tracks properties (key/value) and can store them in Markdown.
- * */
-class PropertyGrid {
-  properties: {[key: string]: any} = {};
+/** A class which has one or more columns and renders its data as a markdown
+ * table. */
+class NoteTable {
+  headers: Array<string> = [];
+  rowData: Array<Array<any>> = [];
 
   load(body: string) {
-    this.properties = {};
+    this.headers = [];
+    this.rowData = [];
 
     let seen = 0;
     for (const line of body.split('\n')) {
@@ -457,36 +597,55 @@ class PropertyGrid {
       seen += 1;
 
       if (seen === 1) {
-        if (line !== '| Key | Value |') {
+        if (line[0] !== '|' || line[line.length - 1] !== '|') {
           throw new Error(`Unexpected line: ${line}`);
         }
+
+        this.headers = line.substring(2, line.length - 2).split(' | ');
       }
       else if (seen === 2) {
-        if (line !== '| :----: | :----: |') {
+        if (!line.startsWith('| :----: |')) {
           throw new Error(`Unexpected line: ${line}`);
         }
       }
       else {
-        const match = /\| (.*) \| (.*) \|/.exec(line);
+        const matchStr = '^\\| ' + this.headers.map(x => '(.*)').join(' \\| ') + ' \\|$';
+        const match = new RegExp(matchStr).exec(line);
         if (match === null) {
-          throw new Error(`Bad line? ${line}`);
+          throw new Error(`Bad line for ${this.headers.join(', ')}, regex '${matchStr}'? ${line}`);
         }
 
-        this.properties[this._escapeUndo(match[1])] = JSON.parse(
-            this._escapeUndo(match[2]));
+        const arr = [];
+        for (let i = 1, m = match.length; i < m; i++) {
+          arr.push(JSON.parse(this._escapeUndo(match[i])));
+        }
+        this.rowData.push(arr);
       }
+    }
+  }
+
+
+  *rows() {
+    const h = this.headers;
+    for (const row of this.rowData) {
+      const rowobj = {} as any;
+      for (let i = 0, m = h.length; i < m; i++) {
+        rowobj[h[i]] = row[i];
+      }
+      yield rowobj;
     }
   }
 
 
   toString() {
     const r = [];
-    r.push('| Key | Value |');
-    r.push('| :----: | :----: |');
-    for (const [k, v] of Object.entries(this.properties)) {
-      r.push(`| ${this._escape(k)} | ${this._escape(JSON.stringify(v))} |`);
+    r.push('| ' + this.headers.join(' | ') + ' |');
+    r.push('| ' + this.headers.map(x => ':----:').join(' | ') + ' |');
+    for (const vals of this.rowData) {
+      const rowVals = vals.map(x => this._escape(JSON.stringify(x)));
+      r.push('| ' + rowVals.join(' | ') + ' |');
     }
-
+    r.push('');  // Always end in empty newline
     return r.join('\n');
   }
 
@@ -496,6 +655,34 @@ class PropertyGrid {
 
   _escapeUndo(v: string) {
     return v.replace('\\|', '|').replace('\\\\', '\\');
+  }
+}
+
+
+/** A class which tracks properties (key/value) and can store them in Markdown.
+ * */
+class PropertyGrid {
+  properties: {[key: string]: any} = {};
+
+  load(body: string) {
+    this.properties = {};
+
+    const nt = new NoteTable();
+    nt.load(body);
+    if (nt.headers.length !== 2 || nt.headers[0] !== 'Key' || nt.headers[1] !== 'Value') {
+      throw new Error(`Unrecognized PropertyGrid: ${body}`);
+    }
+    for (const row of nt.rows()) {
+      this.properties[row.Key] = row.Value;
+    }
+  }
+
+
+  toString() {
+    const under = new NoteTable();
+    under.headers = ['Key', 'Value'];
+    under.rowData = Object.entries(this.properties);
+    return under.toString();
   }
 }
 
