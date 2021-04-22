@@ -1,0 +1,17 @@
+
+.joplin-plugin-remember-remember {
+  border: solid 1px #000;
+  border-radius: 0 0 0.5em 0.5em;
+  margin: 0.5em;
+}
+
+.joplin-plugin-remember-remember > .header {
+  padding: 0.5em;
+  background-color: #eee;
+  font-size: 0.6em;
+}
+
+.joplin-plugin-remember-remember > .body {
+  padding: 0.5em;
+}
+

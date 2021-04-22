@@ -1,3 +1,6 @@
 {
-	"extraScripts": []
+	"extraScripts": [
+    "block-remember.ts",
+    "block-remember-review.ts"
+  ]
 }

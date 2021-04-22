@@ -1,6 +1,6 @@
 import joplin from 'api';
 
-import {SettingItemType} from 'api/types';
+import {ContentScriptType, SettingItemType} from 'api/types';
 
 const pluginName = 'io.github.wwoods.JoplinPluginReminder';
 
@@ -49,14 +49,26 @@ joplin.plugins.register({
         section: pluginName,
         public: true,
         type: SettingItemType.Bool,
-        label: 'Regenerate for today (toggle to activate)',
+        label: 'Regenerate for today (toggle to activate; can also run `rememberPluginForceScan()` from console)',
         value: false,
+        advanced: true,
     });
 
     joplin.settings.onChange(async (event: any) => {
       if (event.keys.indexOf('regenerate') === -1) return;
       await forceScan();
     });
+
+    await joplin.contentScripts.register(
+        ContentScriptType.MarkdownItPlugin,
+        'joplin-plugin-remember-remember',
+        './block-remember.js',
+    );
+    await joplin.contentScripts.register(
+        ContentScriptType.MarkdownItPlugin,
+        'joplin-plugin-remember-remember-review',
+        './block-remember-review.js',
+    );
 
     const db = new Db();
     await db.init();
@@ -159,12 +171,7 @@ class Db {
     if (pg.properties.reviews_completed === undefined) pg.properties.reviews_completed = 0;
 
     const now = new Date();
-    const nowyyyy = now.getFullYear();
-    let nowmm: number|string = now.getMonth() + 1;
-    if (nowmm < 10) nowmm = '0' + nowmm;
-    let nowdd: number|string = now.getDate();
-    if (nowdd < 10) nowdd = '0' + nowdd;
-    let newLimit = `${nowyyyy}${nowmm}${nowdd}`;
+    let newLimit = dateToFormat(now);
 
     let lastUpdated = pg.properties.last_updated;
     console.log(`Considering update... ${newLimit} / ${lastUpdated}`);
@@ -224,7 +231,7 @@ class Db {
     // Now re-scan notes which have remember blocks attached, looking for
     // items to integrate into the reminder system. Then make new reminder note
     // for this day.
-    console.log('re-scanning');
+    console.log('Re-scanning and making new review note');
     const quizParts = [];
     for await (const note of paginatedData(['search'], {
         query: `notebook:${this.logFolderName}`,
@@ -246,15 +253,19 @@ class Db {
       noteBody.push(`# ${qNumber}\n\n${q}\n\n`);
       qNumber += 1;
     }
-    const pgQuiz = new PropertyGrid();
-    pgQuiz.properties.date = newLimit;
-    pgQuiz.properties.reviewNumber = pg.properties.reviews_completed;
-    noteBody.push(`# Data\n${pgQuiz.toString()}`);
-    await joplin.data.post(['notes'], null, {
-      title: `${newLimit} Review`,
-      body: noteBody.join(''),
-      parent_id: this.reviewFolder,
-    });
+
+    if (qNumber !== 1) {
+      // There's a new quiz
+      const pgQuiz = new PropertyGrid();
+      pgQuiz.properties.date = newLimit;
+      pgQuiz.properties.reviewNumber = pg.properties.reviews_completed;
+      noteBody.push(`# Data\n${pgQuiz.toString()}`);
+      await joplin.data.post(['notes'], null, {
+        title: `${newLimit} Review`,
+        body: noteBody.join(''),
+        parent_id: this.reviewFolder,
+      });
+    }
 
     pg.properties.last_updated = newLimit;
     await joplin.data.put(['notes', metadata.id], null, {
@@ -293,16 +304,18 @@ class Db {
    * */
   async _scan_updateReview(reviewNote: any) {
     const reviewRecord = new ReviewRecord(reviewNote);
-    reviewRecord.cleanupSections();
-
-    if (reviewRecord.sections.length === 0) {
-      // All questions were unanswered. Delete and move on.
-      await joplin.data.delete(['notes', reviewNote.id]);
-      return false;
+    if (reviewRecord.cleanupSections()) {
+      if (reviewRecord.sections.length === 0) {
+        // All questions were unanswered. Delete and move on.
+        await joplin.data.delete(['notes', reviewNote.id]);
+        return false;
+      }
+      await reviewRecord.write();
     }
 
+    console.log(reviewRecord.sections);
     for (const sec of reviewRecord.sections) {
-      if (sec.score === undefined) continue;
+      if (sec.score === null) continue;
 
       const logNote = await this.specificNote(this.logNoteName(sec.note_id));
       if (logNote === null) {
@@ -311,14 +324,14 @@ class Db {
       }
 
       const logRecord = new LogRecord(logNote);
-      logRecord.updateScore(sec.block_id, reviewRecord.date,
+      logRecord.logScore(sec.block_id, reviewRecord.date,
           reviewRecord.reviewNumber, sec.score);
       await logRecord.write();
     }
 
     if (reviewRecord.properties.completed === undefined) {
       reviewRecord.properties.completed = true;
-      await reviewRecord.update();
+      await reviewRecord.write();
       return true;
     }
 
@@ -338,7 +351,7 @@ class Db {
     // we cannot reset this plugin's data by simply deleting the notebook.
     const r = await joplin.data.get(['search'], {
       query: `sourceurl:${this.specificNoteValue(id)} notebook:${this.databaseFolderName}`,
-      fields: ['id', 'body'],
+      fields: ['id', 'title', 'body', 'source_url'],
     });
     if (r.items.length === 0) return null;
     if (r.items.length > 1) throw new Error(`Query 'sourceurl:${id}' had more than 1 result`);
@@ -380,6 +393,8 @@ class LogRecord {
     }
     this.note_title = m[1];
     this.note_id = m[2];
+    console.log(`Loading log note for ${this.note_id}`);
+    console.log(this.logNote.body);
 
     m = (/^(\|(.|\n\|)*\|)\s*($|[^|])/gm).exec(this.logNote.body);
     if (m === null) {
@@ -388,12 +403,21 @@ class LogRecord {
     this.pg = new PropertyGrid();
     this.pg.load(m[1]);
 
-    const r3 = /^# (\s+)(.*?)(?=$#)/gm;
+    const r3 = /(^|\n)# (\S+)(.*?)(?=\n#|$)/gs;
     while ((m = r3.exec(this.logNote.body)) !== null) {
+      console.log(`Found LogBlockRecord for ${this.note_id} -- ${m[2]}`);
       const table = new NoteTable();
-      table.load(m[2]);
-      this.blocksTracked.push(new LogBlockRecord(m[1], table));
+      table.load(m[3].trim());
+      this.blocksTracked.push(new LogBlockRecord(m[2], table));
     }
+  }
+
+
+  getLogBlockForContent(id: string) {
+    for (const b of this.blocksTracked) {
+      if (b.blockId === id) return b;
+    }
+    throw new Error(`Could not find ${id}`);
   }
 
 
@@ -476,7 +500,51 @@ class LogRecord {
     return this.pg.properties.blockIdMax.toString();
   }
 
-  updateScore(blockId: string, date: string, reviewNum: number, score: number) {
+  logScore(blockId: string, date: string, reviewNum: number, score: number) {
+    let seen = false;
+    for (const b of this.blocksTracked) {
+      console.log(`Comparing ${b.blockId} to ${blockId} in ${this.note_id}`);
+      if (b.blockId !== blockId) continue;
+      seen = true;
+
+      // Development, maybe someone came back to a quiz later in the day --
+      // remove records with same day
+      while (b.data.rowData.length !== 0) {
+        const lastRecord = b.data.rowDataGet(0);
+        if (lastRecord.date !== date) break;
+        b.data.rowData.splice(0, 1);
+      }
+
+      let efactor: number = 1.3, daysToNext: number = 1;
+      if (b.data.rowData.length !== 0) {
+        const lastRecord = b.data.rowDataGet(0);
+        if (lastRecord.date > date) {
+          // Don't update the past once it's no longer the most recent
+          break;
+        }
+
+        // Update per SM-2
+        efactor = lastRecord.efactor + (0.1 - (5 - score) * (0.08 + (5 - score) * 0.02));
+        efactor = Math.max(efactor, 1.3);
+
+        if (score < 3) daysToNext = 1;
+        else if (daysToNext === 1) daysToNext = 6;
+        else daysToNext = lastRecord.daysToNext * efactor;
+      }
+
+      const data = b.data.rowDataCreate({
+        date: date,
+        reviewNum: reviewNum,
+        userRating: score,
+        efactor: efactor,
+        daysToNext: daysToNext,
+      });
+      b.data.rowData.splice(0, 0, data);
+
+      break;
+    }
+
+    if (!seen) throw new Error(`Could not find ${blockId} in log for ${this.note_id}`);
   }
 
   async write() {
@@ -525,20 +593,54 @@ class RememberBlock {
 
 
   needsQuiz(date: string, reviewNumber: number) {
-    return true;
+    const logBlock = this.logRecord.getLogBlockForContent(this.id);
+    if (logBlock.data.rowData.length === 0) return true;
+
+    const info = logBlock.data.rowDataGet(0);
+    const d = info.date;
+    const lastDate = new Date();
+    lastDate.setFullYear(d.substring(0, 4));
+    lastDate.setMonth(d.substring(4, 6) - 1);
+    lastDate.setDate(d.substring(6, 8));
+    lastDate.setDate(lastDate.getDate() + info.daysToNext);
+
+    let nextDate = dateToFormat(lastDate);
+    if (date >= nextDate) return true;
+    return false;
   }
 
 
   makeQuiz() {
     const r = [];
-    r.push('Quizzy quiz time');
 
-    r.push('\n\n');
-    r.push('Level of recall:\n');
+    // Always terminates in ```
+    const textTrunc = this.blockContent.text;
+    let content = [];
+    let context = [];
+    let re = /```remember.*?\n(.*?)^(# |```)/ms;
+    let m = re.exec(textTrunc);
+    if (m !== null) {
+      content.push(m[1].trim());
+    }
+    m = (/^# context(.*?)^(# |```)/ims).exec(textTrunc);
+    if (m !== null) {
+      context.push(m[1].trim());
+    }
+
+    arrayShuffle(context);
+
+    context.push(this.logRecord.note_title);
+
+    r.push('```remember-review\n');
+    r.push(JSON.stringify({context, content}));
+    r.push('\n```\n');
+
+    // Append quiz part
+    r.push('\n\nLevel of recall:\n');
     for (let i = 5; i >= 0; --i) {
       r.push(`- [ ] ${i}\n`);
     }
-    r.push(`\n\nID: ${this.logRecord.note_id}:${this.id}`);
+    r.push(`\n<span style="display:none">\nID: ${this.logRecord.note_id}:${this.id}</span>`);
     return r.join('');
   }
 
@@ -554,29 +656,104 @@ class RememberBlock {
 
 /** A class for dealing with review notes. */
 class ReviewRecord {
-  data;
+  data = new PropertyGrid();
   date: string;
   reviewNote: any;
-  reviewNumber: number;
+  sections: Array<ReviewSection> = [];
 
   constructor(reviewNote) {
     this.reviewNote = reviewNote;
-    this.data = new PropertyGrid();
-  }
 
-  get sections() {
-    return [];
+    this.date = this.reviewNote.title.substring(0, 8);
+
+    console.log(`Loading review ${this.reviewNote.title}`);
+
+    let m;
+    const r = /(^|\n)# (\d+)\n(.*?)(?=$|\n# )/gs;
+    while ((m = r.exec(this.reviewNote.body)) !== null) {
+      console.log(`Found question ${m[2]}`);
+      this.sections.push(new ReviewSection(m[2], m[3]));
+    }
+
+    const data = (/\n# Data\n(.*?)$/gs).exec(this.reviewNote.body);
+    if (data === null) throw new Error(`No data in ${reviewNote.id}?`);
+
+    this.data.load(data[1]);
   }
 
   get properties() {
     return this.data.properties;
   }
 
-  /** Delete notes without responses */
-  cleanupSections() {
+  get reviewNumber(): number {
+    return this.data.properties.reviewNumber;
   }
 
-  async update() {
+
+  /** Delete sections without responses.
+   *
+   * Returns true if anything was deleted.
+   * */
+  cleanupSections() {
+    let bodyChanged = false;
+    for (let i = this.sections.length - 1; i > -1; i -= 1) {
+      if (this.sections[i].score === null) {
+        bodyChanged = true;
+        this.sections.splice(i, 1);
+      }
+    }
+    return bodyChanged;
+  }
+
+
+  async write() {
+    let body = [];
+    for (let s of this.sections) {
+      body.push(s.toString());
+    }
+    body.push('# Data');
+    body.push(this.data.toString());
+    await joplin.data.put(['notes', this.reviewNote.id], null, {
+      body: body.join('\n'),
+    });
+  }
+}
+
+
+class ReviewSection {
+  block_id: string;
+  note_id: string;
+  score: number|null = null;
+  textHeader: string;
+
+  constructor(public questionIndex: string, textBody: string) {
+    const textTrimmed = textBody.trim();
+    const m = (/\n\nLevel of recall:\n((- \[([xX]| )\] \d\n)+)\n<span.*?>\nID: (\S+)<\/span>$/s).exec(textTrimmed);
+    if (m === null) throw new Error(`No response data in ${textTrimmed}`);
+
+    this.textHeader = textTrimmed.substring(0, m.index);
+    [this.note_id, this.block_id] = m[4].split(':');
+
+    const m2 = /- \[[xX]\] (\d)/.exec(m[1]);
+    if (m2 !== null) {
+      this.score = parseInt(m2[1]);
+    }
+  }
+
+
+  toString() {
+    const body = [];
+    body.push(`# ${this.questionIndex}\n\n`);
+    body.push(this.textHeader);
+    body.push('\n\nLevel of recall:\n');
+    for (let i = 5; i > -1; --i) {
+      body.push('- [');
+      if (this.score !== i) body.push(' ');
+      else body.push('x');
+      body.push(`] ${i}\n`);
+    }
+    body.push(`\n<span style="display:none">\nID: ${this.note_id}:${this.block_id}</span>\n`);
+    return body.join('');
   }
 }
 
@@ -625,14 +802,38 @@ class NoteTable {
   }
 
 
+  rowDataCreate(obj: any) {
+    const o = Object.assign({}, obj);
+    const r = [];
+    for (const h of this.headers) {
+      const v = o[h];
+      if (v === undefined) throw new Error(`cannot encode 'undefined' for ${h}!`);
+      r.push(v);
+      delete o[h];
+    }
+
+    const remainder = Object.entries(o);
+    if (remainder.length !== 0) throw new Error(`Unrecognized parts: ${remainder}`);
+
+    return r;
+  }
+
+
+  rowDataGet(idx: number) {
+    const rowobj = {} as any;
+    const h = this.headers;
+    const row = this.rowData[idx];
+    for (let i = 0, m = h.length; i < m; i++) {
+      rowobj[h[i]] = row[i];
+    }
+    return rowobj;
+  }
+
+
   *rows() {
     const h = this.headers;
-    for (const row of this.rowData) {
-      const rowobj = {} as any;
-      for (let i = 0, m = h.length; i < m; i++) {
-        rowobj[h[i]] = row[i];
-      }
-      yield rowobj;
+    for (let i = 0, m = this.rowData.length; i < m; i++) {
+      yield this.rowDataGet(i);
     }
   }
 
@@ -650,6 +851,7 @@ class NoteTable {
   }
 
   _escape(v: string) {
+    if (v === undefined) throw new Error('Cannot serialize undefined; use null');
     return v.replace('\\', '\\\\').replace('|', '\\|');
   }
 
@@ -699,6 +901,16 @@ function arrayShuffle(arr: Array<any>) {
     arr[idx] = arr[randidx];
     arr[randidx] = tmp;
   }
+}
+
+/** Converts Date to YYYYMMDD */
+function dateToFormat(d: Date) {
+    const nowyyyy = d.getFullYear();
+    let nowmm: number|string = d.getMonth() + 1;
+    if (nowmm < 10) nowmm = '0' + nowmm;
+    let nowdd: number|string = d.getDate();
+    if (nowdd < 10) nowdd = '0' + nowdd;
+    return `${nowyyyy}${nowmm}${nowdd}`;
 }
 
 async function* paginatedData(path, query=undefined) {

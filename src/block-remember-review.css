@@ -1,0 +1,26 @@
+.joplin-plugin-remember-remember-review {
+}
+
+.joplin-plugin-remember-remember-review details > summary {
+  cursor: pointer;
+}
+
+.joplin-plugin-remember-remember-review details > summary:focus {
+  outline: none;
+}
+
+.joplin-plugin-remember-remember-review details ~ details {
+  border-top: solid 1px #000;
+  border-radius: 0.25em;
+}
+
+.joplin-plugin-remember-remember-review details.answer {
+  border-top: solid 4px #000;
+  border-bottom: dashed 1px #000;
+}
+
+.joplin-plugin-remember-remember-review details.answer ~ ul .joplin-checkbox {
+  display: inline-block;
+  margin-right: 2em;
+}
+

@@ -56,6 +56,10 @@ Put above in its own note! Or add to my calendar
 \`\`\`
 ```
 
+# Acknowledgements
+
+Thanks to https://github.com/martinkorelic/joplin-plugin-spoiler-cards for the details business.
+
 # Joplin Plugin
 
 This is a template to create a new Joplin plugin.
