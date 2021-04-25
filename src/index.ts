@@ -5,14 +5,22 @@ import {ContentScriptType, SettingItemType} from 'api/types';
 const pluginName = 'io.github.wwoods.JoplinPluginReminder';
 
 class RememberBlockMatch {
+  id: string|null = null;
   constructor(public text: string, public start: number, public stop: number) {
+    const name = /^```remember (\S+)/.exec(text);
+    if (name === null) {
+      this.id = null;
+    }
+    else {
+      this.id = name[1];
+    }
   }
 }
 function* findRememberBlocks(body: string) {
   const regex = /(^|\n)(```remember( |\n|$).*?(^|\n)```)/gms;
   let m;
   while ((m = regex.exec(body)) !== null) {
-    yield new RememberBlockMatch(m[2], m.index + 1, m.index + m[0].length);
+    yield new RememberBlockMatch(m[2], m.index + m[1].length, m.index + m[0].length);
   }
 }
 
@@ -20,12 +28,79 @@ function* findRememberBlocks(body: string) {
  * as well as scanning note bodies for (newline + ```remember... newline ```).
  * */
 
+
+/** Run some tests */
+async function runTests() {
+  // Add a note with known content and two remember blocks
+  const notebook = await joplin.data.post(['folders'], null, {
+    title: 'Remember-Tests',
+  });
+  
+  const note1Content = `Hey there\n\`\`\`remember\nThis is a thing\n\`\`\`
+More content
+see this?
+
+\`\`\`remember\nBeep boop\n\`\`\`
+
+Again`;
+  const note1ContentExpected = `Hey there\n\`\`\`remember 1\nThis is a thing\n\`\`\`
+More content
+see this?
+
+\`\`\`remember 2\nBeep boop\n\`\`\`
+
+Again`;
+  const note1 = await joplin.data.post(['notes'], null, {
+    title: 'note1',
+    body: note1Content,
+    parent_id: notebook.id,
+  });
+
+  const note2Content = `\`\`\`remember\nThis was at the top\n\`\`\`\nand\n\`\`\`remember\nthis is at the bottom\n\`\`\``;
+  const note2ContentExpected = `\`\`\`remember 1\nThis was at the top\n\`\`\`\nand\n\`\`\`remember 2\nthis is at the bottom\n\`\`\``;
+  const note2 = await joplin.data.post(['notes'], null, {
+    title: 'note2',
+    body: note2Content,
+    parent_id: notebook.id,
+  });
+
+  // Joplin updates indices after ~10 sec
+  await new Promise((resolve) => setTimeout(resolve, 15000));
+
+  try {
+    await forceScan();
+
+    console.log('Test results');
+    const n1 = await joplin.data.get(['notes', note1.id], {fields: 'body'});
+    const n2 = await joplin.data.get(['notes', note2.id], {fields: 'body'});
+    const compare = (header, body, expected) => {
+      if (body === expected) {
+        console.log(`${header}: OK`);
+        return;
+      }
+      console.log(`${header}: Bad`);
+      console.log(`=== Expected\n${expected}\n\n=== Body\n${body}`);
+    };
+    compare('Note one', n1.body, note1ContentExpected);
+    compare('Note two', n2.body, note2ContentExpected);
+  }
+  finally {
+    // Cleanup
+    await joplin.data.delete(['notes', note1.id]);
+    await joplin.data.delete(['notes', note2.id]);
+    await joplin.data.delete(['folders', notebook.id]);
+  }
+}
+
+
+let forceScan: {(): Promise<void>};
+
 joplin.plugins.register({
 	onStart: async function() {
 		console.info('joplin-plugin-remember plugin started!');
 
     let scanUnderway: boolean = false;
-    const forceScan = async () => {
+    forceScan = async () => {
       while (scanUnderway) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
@@ -39,6 +114,8 @@ joplin.plugins.register({
     };
     (window as any).rememberPluginForceScan = forceScan;
     console.info('window.rememberPluginForceScan() added!');
+    (window as any).rememberPluginRunTests = runTests;
+    console.info('window.rememberPluginRunTests() added!');
 
     await joplin.settings.registerSection(pluginName, {
       label: 'Remember',
@@ -214,19 +291,23 @@ class Db {
 
       const noteName = this.logNoteName(n.id);
       const wasTracked = await this.specificNote(noteName);
-      if (wasTracked) continue;
-
-      const logPg = new PropertyGrid();
-      await joplin.data.post(['notes'], null, {
-        title: n.title,
-        source_url: this.specificNoteValue(noteName),
-        body: `[${n.title}](:/${n.id})\n${logPg.toString()}\n\n`,
-        parent_id: this.logFolder,
-      });
+      if (wasTracked) {
+        // Update tracked blocks.
+        const logRecord = new LogRecord(wasTracked);
+        await logRecord.loadBlocks(n);
+        await logRecord.write();
+      }
+      else {
+        // Create new log
+        const logRecord = await LogRecord.create(this, n);
+        await logRecord.loadBlocks(n);
+        await logRecord.write();
+      }
     }
 
-    // Wait a second so that search is updated
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    // Wait a second so that search is updated... actually, search seems to
+    // update after 10 seconds...
+    await new Promise((resolve) => setTimeout(resolve, 15000));
 
     // Now re-scan notes which have remember blocks attached, looking for
     // items to integrate into the reminder system. Then make new reminder note
@@ -279,17 +360,28 @@ class Db {
    * */
   async _scan_getQuiz(logNote: any, date: string, reviewsCompleted: number) {
     const logRecord = new LogRecord(logNote);
-    const baseNote = await joplin.data.get(['notes', logRecord.note_id],
-        {fields: ['id', 'title', 'body', 'parent_id']});
-    await logRecord.loadBlocks(baseNote);
-    await logRecord.write();
+
+    // Don't load the baseNote unless we have to actually generate a quiz.
+    let baseNote = null;
 
     const r = []
-    for (const block of logRecord.blocksOfContent) {
+    for (const block of logRecord.blocksTracked) {
       if (!block.needsQuiz(date, reviewsCompleted)) continue;
+      if (baseNote === null) {
+        try {
+          baseNote = await joplin.data.get(['notes', logRecord.note_id],
+              {fields: ['id', 'title', 'body', 'parent_id']});
+        }
+        catch (e) {
+          // Just skip creating the quiz if the original note doesn't exist.
+          // TODO clean up after note hasn't existed for X days
+          if (e.message === 'Not Found') return r;
+          throw e;
+        }
+      }
       // Note that this doesn't update the log record at all. That only happens
       // when a quiz is completed.
-      r.push(block.makeQuiz());
+      r.push(block.makeQuiz(baseNote));
     }
 
     return r;
@@ -382,6 +474,19 @@ class LogRecord {
   note_title: string;
   pg: PropertyGrid;
 
+  static async create(db: Db, note: any) {
+    const logPg = new PropertyGrid();
+    const logDoc = {
+      title: note.title,
+      source_url: db.specificNoteValue(db.logNoteName(note.id)),
+      body: `[${note.title}](:/${note.id})\n${logPg.toString()}\n\n`,
+      parent_id: db.logFolder,
+    } as any;
+    const r = await joplin.data.post(['notes'], null, logDoc);
+    logDoc.id = r.id;
+    return new LogRecord(logDoc);
+  }
+
   constructor(logNote) {
     let m;
 
@@ -394,7 +499,7 @@ class LogRecord {
     this.note_title = m[1];
     this.note_id = m[2];
     console.log(`Loading log note for ${this.note_id}`);
-    console.log(this.logNote.body);
+    //console.log(this.logNote.body);
 
     m = (/^(\|(.|\n\|)*\|)\s*($|[^|])/gm).exec(this.logNote.body);
     if (m === null) {
@@ -405,7 +510,7 @@ class LogRecord {
 
     const r3 = /(^|\n)# (\S+)(.*?)(?=\n#|$)/gs;
     while ((m = r3.exec(this.logNote.body)) !== null) {
-      console.log(`Found LogBlockRecord for ${this.note_id} -- ${m[2]}`);
+      //console.log(`Found LogBlockRecord for ${this.note_id} -- ${m[2]}`);
       const table = new NoteTable();
       table.load(m[3].trim());
       this.blocksTracked.push(new LogBlockRecord(m[2], table));
@@ -424,8 +529,10 @@ class LogRecord {
   /** Given a note (with title, body, source_url), load blocksOfContent into
    * this log document.
    *
-   * If any remember block gets a new ID, the note is modified to reflect the
-   * new ID. This is the only change which happens in a user's note.
+   * Might overwrite the given note! Basically, each remember block needs a
+   * unique ID, and this writes those new IDs back out to the source note. That
+   * is the only change joplin-plugin-remember makes outside of its own
+   * notebook.
    * */
   async loadBlocks(note: any) {
     console.log(`Finding content in ${note.id} / ${note.title}`);
@@ -568,35 +675,10 @@ class LogBlockRecord {
   }
 
 
-  toString() {
-    const r = [];
-    r.push(`# ${this.blockId}\n`);
-    r.push(this.data.toString());
-    return r.join('');
-  }
-}
-
-
-/** Content block within a note -- temporary class. */
-class RememberBlock {
-  id: string;
-
-  constructor(public logRecord: LogRecord, public blockContent: RememberBlockMatch) {
-    const name = /^```remember (\S+)/.exec(blockContent.text);
-    if (name === null) {
-      this.id = null;
-    }
-    else {
-      this.id = name[1];
-    }
-  }
-
-
   needsQuiz(date: string, reviewNumber: number) {
-    const logBlock = this.logRecord.getLogBlockForContent(this.id);
-    if (logBlock.data.rowData.length === 0) return true;
+    if (this.data.rowData.length === 0) return true;
 
-    const info = logBlock.data.rowDataGet(0);
+    const info = this.data.rowDataGet(0);
     const d = info.date;
     const lastDate = new Date();
     lastDate.setFullYear(d.substring(0, 4));
@@ -610,11 +692,19 @@ class RememberBlock {
   }
 
 
-  makeQuiz() {
+  makeQuiz(note: any) {
     const r = [];
 
+    let text: string;
+    for (const m of findRememberBlocks(note.body)) {
+      if (m.id === this.blockId) {
+        text = m.text;
+        break
+      }
+    }
+
     // Always terminates in ```
-    const textTrunc = this.blockContent.text;
+    const textTrunc = text;
     let content = [];
     let context = [];
     let re = /```remember.*?\n(.*?)^(# |```)/ms;
@@ -629,7 +719,7 @@ class RememberBlock {
 
     arrayShuffle(context);
 
-    context.push(this.logRecord.note_title);
+    context.push(note.title);
 
     r.push('```remember-review\n');
     r.push(JSON.stringify({context, content}));
@@ -640,8 +730,30 @@ class RememberBlock {
     for (let i = 5; i >= 0; --i) {
       r.push(`- [ ] ${i}\n`);
     }
-    r.push(`\n<span style="display:none">\nID: ${this.logRecord.note_id}:${this.id}</span>`);
+    r.push(`\n<span style="display:none">\nID: ${note.id}:${this.blockId}</span>`);
     return r.join('');
+  }
+
+
+  toString() {
+    const r = [];
+    r.push(`# ${this.blockId}\n`);
+    r.push(this.data.toString());
+    return r.join('');
+  }
+}
+
+
+/** Content block within a note -- temporary class. */
+class RememberBlock {
+  get id(): string|null {
+    return this.blockContent.id;
+  }
+  set id(v: string|null) {
+    this.blockContent.id = v;
+  }
+
+  constructor(public logRecord: LogRecord, public blockContent: RememberBlockMatch) {
   }
 
 
