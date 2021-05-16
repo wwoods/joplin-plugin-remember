@@ -29,6 +29,10 @@ export default function(context) {
         }
         html.push('</details>');
 
+        html.push('<details class="notelink"><summary>Link to note</summary>');
+        html.push(`<a href="joplin://${data.note.id}">${htmlEscape(data.note.title)}</a>`);
+        html.push('</details>');
+
         return html.join('');
       };
     },
@@ -40,4 +44,14 @@ export default function(context) {
     },
   };
 };
+
+
+function htmlEscape(v: string) {
+  return (v
+      .replace('&', '&amp;')
+      .replace('<', '&lt;')
+      .replace('>', '&gt;')
+      .replace('"', '&quot;')
+  );
+}
 

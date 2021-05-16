@@ -1,5 +1,8 @@
 import joplin from 'api';
 
+//TODO wait for synchronization before running first check. Consider this a safety
+//feature...
+
 import {ContentScriptType, SettingItemType} from 'api/types';
 
 const pluginName = 'io.github.wwoods.JoplinPluginReminder';
@@ -423,6 +426,7 @@ class Db {
 
     if (reviewRecord.properties.completed === undefined) {
       reviewRecord.properties.completed = true;
+      reviewRecord.reviewNote.title += ' (counted)';
       await reviewRecord.write();
       return true;
     }
@@ -635,7 +639,7 @@ class LogRecord {
         efactor = Math.max(efactor, 1.3);
 
         if (score < 3) daysToNext = 1;
-        else if (daysToNext === 1) daysToNext = 6;
+        else if (lastRecord.daysToNext === 1) daysToNext = 6;
         else daysToNext = lastRecord.daysToNext * efactor;
       }
 
@@ -722,7 +726,7 @@ class LogBlockRecord {
     context.push(note.title);
 
     r.push('```remember-review\n');
-    r.push(JSON.stringify({context, content}));
+    r.push(JSON.stringify({context, content, note: {id: note.id, title: note.title}}));
     r.push('\n```\n');
 
     // Append quiz part
@@ -770,12 +774,9 @@ class RememberBlock {
 class ReviewRecord {
   data = new PropertyGrid();
   date: string;
-  reviewNote: any;
   sections: Array<ReviewSection> = [];
 
-  constructor(reviewNote) {
-    this.reviewNote = reviewNote;
-
+  constructor(public reviewNote) {
     this.date = this.reviewNote.title.substring(0, 8);
 
     console.log(`Loading review ${this.reviewNote.title}`);
@@ -827,6 +828,7 @@ class ReviewRecord {
     body.push(this.data.toString());
     await joplin.data.put(['notes', this.reviewNote.id], null, {
       body: body.join('\n'),
+      title: this.reviewNote.title,
     });
   }
 }
