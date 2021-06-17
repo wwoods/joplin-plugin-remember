@@ -384,7 +384,10 @@ class Db {
       }
       // Note that this doesn't update the log record at all. That only happens
       // when a quiz is completed.
-      r.push(block.makeQuiz(baseNote));
+      const blockQuiz = block.makeQuiz(baseNote);
+      if (blockQuiz !== undefined) {
+        r.push(blockQuiz);
+      }
     }
 
     return r;
@@ -696,15 +699,22 @@ class LogBlockRecord {
   }
 
 
+  /** May return undefined to not quiz on this element.
+   * */
   makeQuiz(note: any) {
     const r = [];
 
-    let text: string;
+    let text: string|undefined;
     for (const m of findRememberBlocks(note.body)) {
       if (m.id === this.blockId) {
         text = m.text;
         break
       }
+    }
+
+    if (text === undefined) {
+      // This block was deleted or otherwise cannot be found.
+      return;
     }
 
     // Always terminates in ```
