@@ -5,19 +5,30 @@
 Something like:
 
 ```
-\`\`\`remember
-Some text to remember
-\`\`\`
+  ```remember
+  Some text to remember
+  ```
+```
+
+Or
+
+```
+  ```remember
+  q: What was the answer?
+  Some answer.
+  q: Multiple questions are OK?
+  Yes they are.
+  ```
 ```
 
 Will associate the note's title with the specified content.
 
 ```
-\`\`\`remember
-Some text to remember
-# Context
-Content to remember it by
-\`\`\`
+  ```remember
+  Some text to remember
+  # Context
+  Content to remember it by
+  ```
 ```
 
 Will instead provide `Content to remember it by` as the triggering key.

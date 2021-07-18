@@ -719,28 +719,57 @@ class LogBlockRecord {
 
     // Always terminates in ```
     const textTrunc = text;
-    let content = [];
-    let context = [];
-    let re = /```remember.*?\n(.*?)^(# |```)/ms;
-    let m = re.exec(textTrunc);
-    if (m !== null) {
-      content.push(m[1].trim());
-    }
-    m = (/^# context(.*?)^(# |```)/ims).exec(textTrunc);
-    if (m !== null) {
-      context.push(m[1].trim());
+    let questions: Array<{context: Array<string>, content: Array<string>}> = [];
+
+    const wholeBodyMatch = (/```remember.*?\n(.*?)^```/ms).exec(textTrunc);
+    if (wholeBodyMatch === null) {
+      // Bad parse?
+      console.log(`Bad remember in: ${note.id}`);
+      return;
     }
 
-    arrayShuffle(context);
+    let body = wholeBodyMatch[1];
+    if (body.trim().toLowerCase().startsWith('q: ')) {
+      // New style -- q: headers for context, answer is everything between those
+      console.log(JSON.stringify(body));
+      let re = /(^|\n)q: (.*?)\n(.*?)(?=\nq: |$)/isg;
+      let m: any;
+      while (null !== (m = re.exec(body))) {
+        questions.push({context: [m[2]], content: [m[3]]});
+      }
+    }
+    else {
+      // Old style -- answer is implicit, q lives in a "# Context" block
+      let nextSection = body.indexOf('\n# ');
+      let question = {context: [], content: []};
+      questions.push(question);
+      if (nextSection === -1) {
+        // Use note as context
+        question.content.push(body.trim());
+      }
+      else {
+        question.content.push(body.substring(0, nextSection+1).trim());
+        body = body.substring(nextSection+1);
+        console.log(JSON.stringify(body));
+        const m = (/^# context(.*?)(\n# |$)/is).exec(body);
+        if (m !== null) {
+          question.context.push(m[1].trim());
+        }
+      }
+    }
 
-    context.push(note.title);
+    for (const q of questions) {
+      arrayShuffle(q.context);
+      q.context.push(note.title);
 
-    r.push('```remember-review\n');
-    r.push(JSON.stringify({context, content, note: {id: note.id, title: note.title}}));
-    r.push('\n```\n');
+      r.push('```remember-review\n');
+      r.push(JSON.stringify({context: q.context,
+          content: q.content, note: {id: note.id, title: note.title}}));
+      r.push('\n```\n\n');
+    }
 
-    // Append quiz part
-    r.push('\n\nLevel of recall:\n');
+    // Append quiz part -- must always be prefix by two newlines
+    r.push('\nLevel of recall:\n');
     for (let i = 5; i >= 0; --i) {
       r.push(`- [ ] ${i}\n`);
     }
