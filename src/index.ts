@@ -125,13 +125,15 @@ joplin.plugins.register({
       iconName: 'fas fa-heartbeat',
     });
 
-    await joplin.settings.registerSetting('regenerate', {
+    await joplin.settings.registerSettings({
+      'regenerate': {
         section: pluginName,
         public: true,
         type: SettingItemType.Bool,
         label: 'Regenerate for today (toggle to activate; can also run `rememberPluginForceScan()` from console)',
         value: false,
         advanced: true,
+      },
     });
 
     joplin.settings.onChange(async (event: any) => {
