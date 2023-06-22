@@ -486,7 +486,7 @@ class LogRecord {
   static async create(db: Db, note: any) {
     const logPg = new PropertyGrid();
     const logDoc = {
-      title: note.title,
+      title: `${Db.DB_NAME} ${note.title}`,
       source_url: db.specificNoteValue(db.logNoteName(note.id)),
       body: `[${note.title}](:/${note.id})\n${logPg.toString()}\n\n`,
       parent_id: db.logFolder,
