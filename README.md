@@ -1,5 +1,10 @@
 # joplin-plugin-remember
 
+## Building
+
+Must build with `NODE_OPTIONS=--openssl-legacy-provider` on newer node versions,
+until Joplin updates its webpack version.
+
 ## Usage
 
 Something like:
