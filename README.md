@@ -72,6 +72,29 @@ Put above in its own note! Or add to my calendar
 \`\`\`
 ```
 
+# Recall system
+
+This plugin uses spaced repitition, similar to Anki or other.
+
+The current formula is based on SuperMemo-2 and uses a default efactor of 1.3.
+The exact formula for the number of days between reminders is:
+
+$$
+  efactor_t &= max\left(1.3, efactor_{t-1} + (0.1 - (5 - score) * (0.8 + (5 - score) * 0.02))\right) \\
+  days_t &= 1\text{ if }score \in \{0, 1, 2\}\text{ else }max\left(6, days_{t-1} * efactor_t\right)
+$$
+
+As a table, for convenience, here's score to efactor changes:
+
+| Score | Efactor Delta |
+| ----- | ------------- |
+|     0 | -0.80         |
+|     1 | -0.54         |
+|     2 | -0.32         |
+|     3 | -0.14         |
+|     4 |  0.00         |
+|     5 |  0.10         |
+
 # Acknowledgements
 
 Thanks to https://github.com/martinkorelic/joplin-plugin-spoiler-cards for the details business.
