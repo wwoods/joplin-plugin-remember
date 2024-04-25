@@ -455,7 +455,19 @@ class Db {
       fields: ['id', 'title', 'body', 'source_url'],
     });
     if (r.items.length === 0) return null;
-    if (r.items.length > 1) throw new Error(`Query 'sourceurl:${id}' had more than 1 result`);
+    if (r.items.length > 1) {
+      // Often, this happens due to e.g. sync conflicts
+      // The "right" thing to do is ambiguous. We could:
+      // 1. Delete entries after the first. Might delete the wrong record.
+      // 2. Keep all entries, and just return the first. Might cause confusing
+      //    updates between sync versions.
+      // Since this is all generated, we're going to delete after the first.
+      //
+      for (let i = 1, m = r.items.length; i < m; i++) {
+        await joplin.data.delete(['notes', r.items[i].id]);
+      }
+      console.log(`Query 'sourceurl:${id}' had multiple results (${r.items.length}). Deleted all but first.`);
+    }
     return r.items[0];
   }
 

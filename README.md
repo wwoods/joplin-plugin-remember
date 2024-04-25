@@ -76,6 +76,10 @@ Put above in its own note! Or add to my calendar
 
 Thanks to https://github.com/martinkorelic/joplin-plugin-spoiler-cards for the details business.
 
+# Changelog
+
+* 2024-04-25 1.0.6. Deleted old records when there were multiple. This error likely resulted from sync-related issues, and blocked the generation of quizzes, which prevented the plugin from functioning.
+
 # Joplin Plugin
 
 This is a template to create a new Joplin plugin.
