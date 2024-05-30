@@ -156,7 +156,7 @@ joplin.plugins.register({
     await db.init();
 
     // On initialization, wait 10 minutes OR until the end of the first sync
-    let scanInit = true;
+    let scanMode = 0;  // 0 - init / timer-based, 2 - wait for next sync, 3 - sync observed
     const scanInitEndTime = Date.now() + 10 * 60 * 1000;
 
     const syncStart = () => {
@@ -168,7 +168,8 @@ joplin.plugins.register({
       }
       const afterTimeout = () => {
         scanUnderway = false;
-        scanInit = false;  // Stop init after first sync completes
+        scanMode = 3;  // Even if not in init, we should scan only after
+                       // synchronizations
       }
       // Short timeout just to prevent any potential race conditions with sync
       setTimeout(afterTimeout, 2000);
@@ -178,13 +179,18 @@ joplin.plugins.register({
 
     // Initial loop -- wait until a sync finishes OR some amount of startup time,
     // whichever is first
-    while (scanInit && Date.now() < scanInitEndTime) {
-      await new Promise((resolve) => setTimeout(resolve, 10 * 1000));
+    while (scanMode === 0 && Date.now() < scanInitEndTime) {
+      await new Promise((resolve) => setTimeout(resolve, 2 * 1000));
     }
 
     // Main loop
     while (true) {
-      if (!scanUnderway) {
+      if (!scanUnderway && (scanMode === 0 || scanMode === 3)) {
+        if (scanMode === 3) {
+          // We've "used up" this sync, so wait for next
+          scanMode = 2;
+        }
+
         scanUnderway = true;
         try {
           await db.scan();
