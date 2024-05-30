@@ -155,6 +155,34 @@ joplin.plugins.register({
     const db = new Db();
     await db.init();
 
+    // On initialization, wait 10 minutes OR until the end of the first sync
+    let scanInit = true;
+    const scanInitEndTime = Date.now() + 10 * 60 * 1000;
+
+    const syncStart = () => {
+      scanUnderway = true;
+    };
+    const syncComplete = () => {
+      if (!scanUnderway) {
+        console.error("Should have had syncUnderway set to true");
+      }
+      const afterTimeout = () => {
+        scanUnderway = false;
+        scanInit = false;  // Stop init after first sync completes
+      }
+      // Short timeout just to prevent any potential race conditions with sync
+      setTimeout(afterTimeout, 2000);
+    };
+    joplin.workspace.onSyncStart(syncStart);
+    joplin.workspace.onSyncComplete(syncComplete);
+
+    // Initial loop -- wait until a sync finishes OR some amount of startup time,
+    // whichever is first
+    while (scanInit && Date.now() < scanInitEndTime) {
+      await new Promise((resolve) => setTimeout(resolve, 10 * 1000));
+    }
+
+    // Main loop
     while (true) {
       if (!scanUnderway) {
         scanUnderway = true;
