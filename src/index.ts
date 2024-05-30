@@ -444,7 +444,7 @@ class Db {
       }
       // Note that this doesn't update the log record at all. That only happens
       // when a quiz is completed.
-      const blockQuiz = block.makeQuiz(baseNote);
+      const blockQuiz = block.makeQuiz(baseNote, logNote);
       if (blockQuiz !== undefined) {
         r.push(blockQuiz);
       }
@@ -587,12 +587,13 @@ class LogRecord {
     this.pg = new PropertyGrid();
     this.pg.load(m[1]);
 
-    const r3 = /(^|\n)# (\S+)(.*?)(?=\n#|$)/gs;
+    const r3 = /(^|\n)# (\S+)(\s*(^|\n)\{[^\n]*($|\n))?(.*?)(?=\n#|$)/gs;
     while ((m = r3.exec(this.logNote.body)) !== null) {
       //console.log(`Found LogBlockRecord for ${this.note_id} -- ${m[2]}`);
+      const props = JSON.parse(m[3] || '{}');
       const table = new NoteTable();
-      table.load(m[3].trim());
-      this.blocksTracked.push(new LogBlockRecord(m[2], table));
+      table.load(m[6].trim());
+      this.blocksTracked.push(new LogBlockRecord(m[2], props, table));
     }
   }
 
@@ -649,7 +650,7 @@ class LogRecord {
       if (trackedBlocks[b.id] === undefined) {
         const table = new NoteTable();
         table.headers = ['date', 'reviewNum', 'userRating', 'efactor', 'daysToNext'];
-        const tb = new LogBlockRecord(b.id, table);
+        const tb = new LogBlockRecord(b.id, {}, table);
         this.blocksTracked.push(tb);
         trackedBlocks[b.id] = tb;
       }
@@ -750,11 +751,15 @@ class LogRecord {
 
 /** Within a LogRecord, this is the information for a single remember block. */
 class LogBlockRecord {
-  constructor(public blockId: string, public data: NoteTable) {
+  constructor(public blockId: string, public props: any, public data: NoteTable) {
+    if (this.props.disabled === undefined) {
+      this.props.disabled = false;
+    }
   }
 
 
   needsQuiz(date: string, reviewNumber: number) {
+    if (this.props.disabled) return false;
     if (this.data.rowData.length === 0) return true;
 
     const info = this.data.rowDataGet(0);
@@ -773,7 +778,7 @@ class LogBlockRecord {
 
   /** May return undefined to not quiz on this element.
    * */
-  makeQuiz(note: any) {
+  makeQuiz(note: any, noteLog: any) {
     const r = [];
 
     let text: string|undefined;
@@ -835,8 +840,12 @@ class LogBlockRecord {
       q.context.push(note.title);
 
       r.push('```remember-review\n');
-      r.push(JSON.stringify({context: q.context,
-          content: q.content, note: {id: note.id, title: note.title}}));
+      r.push(JSON.stringify({
+          context: q.context,
+          content: q.content,
+          note: {id: note.id, title: note.title},
+          noteLog: {id: noteLog.id, title: noteLog.title},
+      }));
       r.push('\n```\n\n');
     }
 
@@ -853,6 +862,7 @@ class LogBlockRecord {
   toString() {
     const r = [];
     r.push(`# ${this.blockId}\n`);
+    r.push(`${JSON.stringify(this.props)}\n`);
     r.push(this.data.toString());
     return r.join('');
   }

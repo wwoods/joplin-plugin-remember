@@ -30,7 +30,10 @@ export default function(context) {
         html.push('</details>');
 
         html.push('<details class="notelink"><summary>Link to note</summary>');
-        html.push(`<a href="joplin://${data.note.id}">${htmlEscape(data.note.title)}</a>`);
+        html.push(`<p><a href="joplin://${data.note.id}">${htmlEscape(data.note.title)}</a></p>`);
+        if (data.noteLog) {
+          html.push(`<p><a href="joplin://${data.noteLog.id}">(Remember Plugin Database) ${htmlEscape(data.noteLog.title)}</a></p>`);
+        }
         html.push('</details>');
 
         return html.join('');
