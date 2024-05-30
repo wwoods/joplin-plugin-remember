@@ -290,12 +290,18 @@ class Db {
       return;
     }
 
+    // Keep track of errors (markdown snippets) to log
+    let quizUpdateReason: string = "";
+    const quizErrors = [];
+
     let loader;
     const loaderFields = ['id', 'title', 'body', 'parent_id', 'updated_time'];
     if (lastUpdated === undefined) {
+      quizUpdateReason = `Full scan needed for update`;
       loader = paginatedData(['notes'], {fields: loaderFields});
     }
     else {
+      quizUpdateReason = `Partial scan for update from ${lastUpdated}`;
       loader = paginatedData(['search'], {
         query: `updated:${lastUpdated}`,  // To not look at current docs:  -updated:${newLimit}`,
         fields: loaderFields,
@@ -303,38 +309,43 @@ class Db {
     }
     for await (const n of loader) {
       // This note was updated... process.
-      if (n.parent_id === this.reviewFolder) {
-        if (!force && n.updated_time > Date.now() - 3600 * 1000) {
-          // Modified within last hour and not forced -- delay evaluating this
-          // review. In fact, abort this whole process since we don't want to
-          // trigger a new review while the user is actively working on an
-          // existing review.
-          console.log(`Aborting update due to ${n.id} / ${n.title} being modified `
-              + `only ${(n.updated_time - Date.now()) / 60000} minutes ago.`);
-          return;
+      try {
+        if (n.parent_id === this.reviewFolder) {
+          if (!force && n.updated_time > Date.now() - 3600 * 1000) {
+            // Modified within last hour and not forced -- delay evaluating this
+            // review. In fact, abort this whole process since we don't want to
+            // trigger a new review while the user is actively working on an
+            // existing review.
+            console.log(`Aborting update due to ${n.id} / ${n.title} being modified `
+                + `only ${(n.updated_time - Date.now()) / 60000} minutes ago.`);
+            return;
+          }
+          const newlyCompleted = await this._scan_updateReview(n);
+          if (newlyCompleted) pg.properties.reviews_completed++;
+          continue;
         }
-        const newlyCompleted = await this._scan_updateReview(n);
-        if (newlyCompleted) pg.properties.reviews_completed++;
-        continue;
-      }
 
-      // See if it has any `remember` blocks,
-      // and update the meta-collection if it does/not.
-      if (findRememberBlocks(n.body).next().done) continue;
+        // See if it has any `remember` blocks,
+        // and update the meta-collection if it does/not.
+        if (findRememberBlocks(n.body).next().done) continue;
 
-      const noteName = this.logNoteName(n.id);
-      const wasTracked = await this.specificNote(noteName);
-      if (wasTracked) {
-        // Update tracked blocks.
-        const logRecord = new LogRecord(wasTracked);
-        await logRecord.loadBlocks(n);
-        await logRecord.write();
+        const noteName = this.logNoteName(n.id);
+        const wasTracked = await this.specificNote(noteName);
+        if (wasTracked) {
+          // Update tracked blocks.
+          const logRecord = new LogRecord(wasTracked);
+          await logRecord.loadBlocks(n);
+          await logRecord.write();
+        }
+        else {
+          // Create new log
+          const logRecord = await LogRecord.create(this, n);
+          await logRecord.loadBlocks(n);
+          await logRecord.write();
+        }
       }
-      else {
-        // Create new log
-        const logRecord = await LogRecord.create(this, n);
-        await logRecord.loadBlocks(n);
-        await logRecord.write();
+      catch (e) {
+        quizErrors.push(_escape(`Error updating quiz info for ${n.title}: ${e}`));
       }
     }
 
@@ -350,36 +361,55 @@ class Db {
     for await (const note of paginatedData(['search'], {
         query: `notebook:${this.logFolderName}`,
         fields: ['id', 'title', 'body', 'parent_id']})) {
-      quizParts.push(this._scan_getQuiz(note, newLimit,
-            pg.properties.reviews_completed));
+      const quizPromise = this._scan_getQuiz(note, newLimit,
+          pg.properties.reviews_completed);
+      quizParts.push(quizPromise.catch((error) => new Error(
+          `Error generating quiz data for ${note.title}: ${error}`)));
     }
+
     const quizParts2 = await Promise.all(quizParts);
     const quizFlat = [];
     for (const qp of quizParts2) {
+      if (qp instanceof Error) {
+        quizErrors.push(_escape(qp.toString()));
+        continue;
+      }
       quizFlat.push.apply(quizFlat, qp);
     }
     arrayShuffle(quizFlat);
 
     // Build review note, post it
     const noteBody = []
+
+    if (quizErrors.length !== 0) {
+      noteBody.push(`# Errors\n\n`);
+      for (let i = 0, m = quizErrors.length; i < m; i++) {
+        const q = quizErrors[i];
+        noteBody.push(`## Error ${i+1}\n\n${q}\n\n`);
+      }
+    }
+
     let qNumber = 1;
     for (const q of quizFlat) {
       noteBody.push(`# ${qNumber}\n\n${q}\n\n`);
       qNumber += 1;
     }
 
-    if (qNumber !== 1) {
-      // There's a new quiz
-      const pgQuiz = new PropertyGrid();
-      pgQuiz.properties.date = newLimit;
-      pgQuiz.properties.reviewNumber = pg.properties.reviews_completed;
-      noteBody.push(`# Data\n${pgQuiz.toString()}`);
-      await joplin.data.post(['notes'], null, {
-        title: `${newLimit} Review`,
-        body: noteBody.join(''),
-        parent_id: this.reviewFolder,
-      });
+    if (qNumber === 1) {
+      // No questions. Log that
+      noteBody.push(`# No questions\n\nAll done for today!\n\n`);
     }
+
+    // There's a new quiz
+    const pgQuiz = new PropertyGrid();
+    pgQuiz.properties.date = newLimit;
+    pgQuiz.properties.reviewNumber = pg.properties.reviews_completed;
+    noteBody.push(`# Data\n${pgQuiz.toString()}`);
+    await joplin.data.post(['notes'], null, {
+      title: `${newLimit} Review`,
+      body: noteBody.join(''),
+      parent_id: this.reviewFolder,
+    });
 
     pg.properties.last_updated = newLimit;
     await joplin.data.put(['notes', metadata.id], null, {
@@ -889,6 +919,10 @@ class ReviewRecord {
    * Returns true if anything was deleted.
    * */
   cleanupSections() {
+    // Special case -- if we do not have any sections, then always treat the
+    // body as changed, so that this blank quiz gets deleted.
+    if (this.sections.length === 0) return true;
+
     let bodyChanged = false;
     for (let i = this.sections.length - 1; i > -1; i -= 1) {
       if (this.sections[i].score === null) {
@@ -1046,13 +1080,18 @@ class NoteTable {
   }
 
   _escape(v: string) {
-    if (v === undefined) throw new Error('Cannot serialize undefined; use null');
-    return v.replace('\\', '\\\\').replace('|', '\\|');
+    return _escape(v);
   }
 
   _escapeUndo(v: string) {
     return v.replace('\\|', '|').replace('\\\\', '\\');
   }
+}
+
+
+function _escape(v: string) {
+  if (v === undefined) throw new Error('Cannot serialize undefined; use null');
+  return v.replace('\\', '\\\\').replace('|', '\\|');
 }
 
 
