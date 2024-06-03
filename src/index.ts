@@ -6,6 +6,7 @@ import joplin from 'api';
 import {ContentScriptType, SettingItemType} from 'api/types';
 
 const pluginName = 'io.github.wwoods.JoplinPluginReminder';
+const JOPLIN_INDEX_UPDATE_TIME = 15000;
 
 class RememberBlockMatch {
   id: string|null = null;
@@ -68,7 +69,7 @@ Again`;
   });
 
   // Joplin updates indices after ~10 sec
-  await new Promise((resolve) => setTimeout(resolve, 15000));
+  await new Promise((resolve) => setTimeout(resolve, JOPLIN_INDEX_UPDATE_TIME));
 
   try {
     await forceScan();
@@ -161,6 +162,8 @@ joplin.plugins.register({
 
     const syncStart = () => {
       scanUnderway = true;
+      // Immediately flag that we only work after synchronizations
+      scanMode = 2;
     };
     const syncComplete = () => {
       if (!scanUnderway) {
@@ -171,8 +174,9 @@ joplin.plugins.register({
         scanMode = 3;  // Even if not in init, we should scan only after
                        // synchronizations
       }
-      // Short timeout just to prevent any potential race conditions with sync
-      setTimeout(afterTimeout, 2000);
+
+      // We need the index to update post-sync, so wait for that
+      setTimeout(afterTimeout, JOPLIN_INDEX_UPDATE_TIME);
     };
     joplin.workspace.onSyncStart(syncStart);
     joplin.workspace.onSyncComplete(syncComplete);
@@ -357,7 +361,7 @@ class Db {
 
     // Wait a second so that search is updated... actually, search seems to
     // update after 10 seconds...
-    await new Promise((resolve) => setTimeout(resolve, 15000));
+    await new Promise((resolve) => setTimeout(resolve, JOPLIN_INDEX_UPDATE_TIME));
 
     // Now re-scan notes which have remember blocks attached, looking for
     // items to integrate into the reminder system. Then make new reminder note

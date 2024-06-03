@@ -101,6 +101,8 @@ Thanks to https://github.com/martinkorelic/joplin-plugin-spoiler-cards for the d
 
 # Changelog
 
+* 2024-06-03 1.0.8. Stab at fixing multi-quiz issue with multiple devices syncing. I think it's because the index takes awhile to update post-sync.
+
 * 2024-05-30 1.0.7. Initial quiz generation only happens after first sync or 10 minutes, whichever happens first. Quiz generated even if no questions for the day. Error messages are stored in quiz rather than squelched. Quizzes get link to the Remember plugin's database for a given question. Quiz database pages store metadata about a question, allowing users to disable that question by modifying the JSON.
 
 * 2024-04-25 1.0.6. Deleted old records when there were multiple. This error likely resulted from sync-related issues, and blocked the generation of quizzes, which prevented the plugin from functioning.
